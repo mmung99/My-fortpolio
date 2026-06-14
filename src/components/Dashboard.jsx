@@ -18,7 +18,6 @@ export default function Dashboard({ onAddTrade }) {
   const { prices, loading, lastUpdated, refetch } = useStockPrices(tickers)
   const [range, setRange] = useState('3m')
 
-  // Current prices map: ticker -> number
   const currentPrices = useMemo(() => {
     const map = {}
     portfolio.holdings.forEach(h => {
@@ -27,7 +26,9 @@ export default function Dashboard({ onAddTrade }) {
     return map
   }, [prices, portfolio.holdings])
 
-  const { totalInvested, totalMarketValue, realizedPnl, unrealizedPnl } = portfolio.summary(currentPrices)
+  const summaryData = portfolio.summary(currentPrices)
+  const { totalInvested, totalMarketValue, realizedPnl, unrealizedPnl } = summaryData
+  const { syncing, syncStatus } = portfolio
   const totalPnlPct = totalInvested > 0 ? (unrealizedPnl / totalInvested * 100) : 0
 
   const holdingsWithPrice = portfolio.holdings.map(h => ({
@@ -37,13 +38,22 @@ export default function Dashboard({ onAddTrade }) {
     marketValue: (currentPrices[h.ticker] ?? h.avgCost) * h.qty,
   }))
 
-  if (portfolio.holdings.length === 0) {
+  if (portfolio.holdings.length === 0 && !syncing) {
     return (
       <div className="empty-state">
         <div className="empty-icon">📊</div>
         <h2>ยังไม่มีหุ้นในพอร์ต</h2>
         <p>เริ่มต้นด้วยการบันทึกการซื้อครั้งแรก</p>
         <button className="btn-primary" onClick={onAddTrade}>+ บันทึกการซื้อ</button>
+      </div>
+    )
+  }
+
+  if (syncing && portfolio.holdings.length === 0) {
+    return (
+      <div className="empty-state">
+        <div className="spinner" style={{ width: 32, height: 32, borderWidth: 3 }} />
+        <p style={{ marginTop: 12, color: '#6B7280' }}>กำลังโหลดข้อมูลจาก Google Sheets...</p>
       </div>
     )
   }
@@ -55,7 +65,13 @@ export default function Dashboard({ onAddTrade }) {
         <div>
           <h1 className="page-title">ภาพรวมพอร์ต</h1>
           <p className="page-sub">
-            {loading ? '⏳ กำลังอัปเดตราคา...' : lastUpdated ? `อัปเดต ${lastUpdated.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' })}` : ''}
+            {syncing
+              ? '☁️ กำลังซิงค์ Google Sheets...'
+              : syncStatus === 'ok'
+              ? `✅ ซิงค์แล้ว · ${loading ? 'กำลังอัปเดตราคา...' : lastUpdated ? `ราคา ${lastUpdated.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' })}` : ''}`
+              : syncStatus === 'error'
+              ? '⚠️ ซิงค์ไม่สำเร็จ ข้อมูลบันทึก local'
+              : loading ? '⏳ กำลังอัปเดตราคา...' : ''}
           </p>
         </div>
         <div className="header-actions">
@@ -128,9 +144,7 @@ export default function Dashboard({ onAddTrade }) {
                   </td>
                   <td className="num">${fmt(h.avgCost)}</td>
                   <td className="num">
-                    <span className={loading ? 'loading-price' : ''}>
-                      ${fmt(h.current)}
-                    </span>
+                    <span className={loading ? 'loading-price' : ''}>${fmt(h.current)}</span>
                   </td>
                   <td className="num">{h.qty}</td>
                   <td className="num">${fmt(h.marketValue)}</td>

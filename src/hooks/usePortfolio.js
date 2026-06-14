@@ -1,13 +1,14 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect, useRef } from 'react'
+import { loadFromSheets, saveToSheets } from '../utils/sheets'
 
 const STORAGE_KEY = 'portfolio_v1'
 
 const DEFAULT_STATE = {
-  holdings: [],      // { ticker, name, avgCost, qty, totalInvested, color }
-  transactions: [],  // { id, date, ticker, type, qty, price, thbAmount, note, realizedPnl }
+  holdings: [],
+  transactions: [],
 }
 
-function load() {
+function loadLocal() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
     return raw ? JSON.parse(raw) : DEFAULT_STATE
@@ -16,21 +17,54 @@ function load() {
   }
 }
 
-function save(state) {
+function saveLocal(state) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state))
 }
 
 const COLORS = ['#2563EB','#16A34A','#7C3AED','#DC2626','#D97706','#0891B2','#9D174D','#065F46']
 
 export function usePortfolio() {
-  const [state, setState] = useState(load)
+  const [state, setState] = useState(loadLocal)
+  const [syncing, setSyncing] = useState(false)
+  const [syncStatus, setSyncStatus] = useState(null) // 'ok' | 'error' | null
+  const saveTimer = useRef(null)
+
+  // Load from Google Sheets on first mount
+  useEffect(() => {
+    async function init() {
+      setSyncing(true)
+      const sheetsData = await loadFromSheets()
+      if (sheetsData && (sheetsData.holdings.length > 0 || sheetsData.transactions.length > 0)) {
+        setState(sheetsData)
+        saveLocal(sheetsData)
+        setSyncStatus('ok')
+      }
+      setSyncing(false)
+    }
+    init()
+  }, [])
+
+  // Auto-save to Sheets (debounced 2s after any change)
+  const scheduleSave = useCallback((nextState) => {
+    if (saveTimer.current) clearTimeout(saveTimer.current)
+    saveTimer.current = setTimeout(async () => {
+      setSyncing(true)
+      try {
+        await saveToSheets(nextState)
+        setSyncStatus('ok')
+      } catch {
+        setSyncStatus('error')
+      }
+      setSyncing(false)
+    }, 2000)
+  }, [])
 
   const commit = useCallback((next) => {
     setState(next)
-    save(next)
-  }, [])
+    saveLocal(next)
+    scheduleSave(next)
+  }, [scheduleSave])
 
-  // Add a BUY transaction
   const buyStock = useCallback((ticker, name, qty, price, thbAmount, date, note) => {
     setState(prev => {
       const txn = {
@@ -49,7 +83,6 @@ export function usePortfolio() {
       const idx = holdings.findIndex(h => h.ticker === ticker.toUpperCase())
 
       if (idx === -1) {
-        // New holding
         const colorIdx = holdings.length % COLORS.length
         holdings.push({
           ticker: ticker.toUpperCase(),
@@ -61,7 +94,6 @@ export function usePortfolio() {
           color: COLORS[colorIdx],
         })
       } else {
-        // Average down / up
         const h = { ...holdings[idx] }
         const newTotal = h.totalInvested + Number(qty) * Number(price)
         h.qty = h.qty + Number(qty)
@@ -72,12 +104,12 @@ export function usePortfolio() {
       }
 
       const next = { holdings, transactions: [txn, ...prev.transactions] }
-      save(next)
+      saveLocal(next)
+      scheduleSave(next)
       return next
     })
-  }, [])
+  }, [scheduleSave])
 
-  // Add a SELL transaction — calculate realized P&L automatically
   const sellStock = useCallback((ticker, qty, price, date, note) => {
     setState(prev => {
       const holdings = [...prev.holdings]
@@ -111,28 +143,28 @@ export function usePortfolio() {
       }
 
       const next = { holdings, transactions: [txn, ...prev.transactions] }
-      save(next)
+      saveLocal(next)
+      scheduleSave(next)
       return next
     })
-  }, [])
+  }, [scheduleSave])
 
-  // Delete a transaction (simple remove, does not re-adjust holdings)
   const deleteTransaction = useCallback((id) => {
     setState(prev => {
       const next = { ...prev, transactions: prev.transactions.filter(t => t.id !== id) }
-      save(next)
+      saveLocal(next)
+      scheduleSave(next)
       return next
     })
-  }, [])
+  }, [scheduleSave])
 
-  // Export CSV
   const exportCSV = useCallback(() => {
     const { transactions } = state
     const rows = [
       ['วันที่','หุ้น','ประเภท','จำนวน','ราคา/หุ้น ($)','เงิน (บาท)','กำไร/ขาดทุน ($)','หมายเหตุ'],
       ...transactions.map(t => [
         t.date, t.ticker, t.type === 'buy' ? 'ซื้อ' : 'ขาย',
-        t.qty, t.price, t.thbAmount ?? '', 
+        t.qty, t.price, t.thbAmount ?? '',
         t.realizedPnl != null ? t.realizedPnl.toFixed(2) : '',
         t.note ?? ''
       ])
@@ -144,7 +176,6 @@ export function usePortfolio() {
     URL.revokeObjectURL(url)
   }, [state])
 
-  // Totals
   const summary = useCallback((prices = {}) => {
     const { holdings, transactions } = state
     let totalInvested = 0, totalMarketValue = 0
@@ -158,5 +189,5 @@ export function usePortfolio() {
     return { totalInvested, totalMarketValue, realizedPnl, unrealizedPnl }
   }, [state])
 
-  return { ...state, buyStock, sellStock, deleteTransaction, exportCSV, summary }
+  return { ...state, buyStock, sellStock, deleteTransaction, exportCSV, summary, syncing, syncStatus }
 }
